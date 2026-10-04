@@ -14,82 +14,69 @@ echo "======================================"
 echo ""
 
 # =========================================================
-# 1. Удаляем старый TorrServer
+# 1. Удаление старого TorrServer
 # =========================================================
 
 echo "[1/5] Удаление старого TorrServer..."
 
-if [ -f "${INIT_SCRIPT}" ]; then
-    echo "Останавливаем службу..."
-
+if [ -x "${INIT_SCRIPT}" ]; then
+    echo "Остановка службы..."
     "${INIT_SCRIPT}" stop 2>/dev/null
     "${INIT_SCRIPT}" disable 2>/dev/null
-
-    rm -f "${INIT_SCRIPT}"
 fi
 
 killall torrserver 2>/dev/null
 killall TorrServer 2>/dev/null
 
 rm -f "${BINARY}"
+rm -f "${INIT_SCRIPT}"
+
+mkdir -p "${DIR}"
 
 echo "Старый TorrServer удалён."
 echo ""
 
 # =========================================================
-# 2. Определяем архитектуру
+# 2. Определение архитектуры
 # =========================================================
 
 echo "[2/5] Определение архитектуры..."
 
 MACHINE="$(uname -m)"
 
+echo "Система: ${MACHINE}"
+
 case "${MACHINE}" in
-    x86_64)
-        ARCH="amd64"
-        ;;
-    i386|i486|i586|i686)
-        ARCH="386"
-        ;;
     aarch64)
         ARCH="arm64"
         ;;
-    armv7|armv7l)
+    armv7l)
         ARCH="arm7"
         ;;
-    armv6|armv6l)
+    armv6l)
         ARCH="arm6"
         ;;
-    armv5|armv5l)
-        ARCH="arm5"
+    x86_64)
+        ARCH="amd64"
         ;;
-    mips64el)
-        ARCH="mips64le"
-        ;;
-    mips64)
-        ARCH="mips64"
-        ;;
-    mipsel)
-        ARCH="mipsle"
-        ;;
-    mips)
-        ARCH="mips"
+    i386|i686)
+        ARCH="386"
         ;;
     *)
-        echo "ОШИБКА: неподдерживаемая архитектура: ${MACHINE}"
+        echo ""
+        echo "ОШИБКА: неизвестная архитектура: ${MACHINE}"
         exit 1
         ;;
 esac
 
-echo "Система:     ${MACHINE}"
-echo "Архитектура: ${ARCH}"
+echo "Архитектура TorrServer: ${ARCH}"
 echo ""
 
 # =========================================================
-# 3. Получаем последний релиз
+# 3. Получение последнего релиза
 # =========================================================
 
-echo "[3/5] Поиск последнего релиза..."
+echo "[3/5] Получение последнего релиза..."
 
 RELEASE_JSON="/tmp/torrserver_release.json"
 
@@ -100,8 +87,9 @@ wget -q -O "${RELEASE_JSON}" \
     --header="User-Agent: Routerich-TorrServer-Installer" \
     "${API_URL}"
 
-if [ $? -ne 0 ] || [ ! -s "${RELEASE_JSON}" ]; then
-    echo "ОШИБКА: не удалось получить информацию о релизе."
+if [ ! -s "${RELEASE_JSON}" ]; then
+    echo ""
+    echo "ОШИБКА: не удалось получить информацию о последнем релизе."
     rm -f "${RELEASE_JSON}"
     exit 1
 fi
@@ -116,7 +104,8 @@ RELEASE_TAG="$(
 rm -f "${RELEASE_JSON}"
 
 if [ -z "${RELEASE_TAG}" ]; then
-    echo "ОШИБКА: не удалось определить версию релиза."
+    echo ""
+    echo "ОШИБКА: не удалось определить последний релиз."
     exit 1
 fi
 
@@ -124,7 +113,7 @@ echo "Последний релиз: ${RELEASE_TAG}"
 echo ""
 
 # =========================================================
-# 4. Формируем ПРЯМОЙ URL нужного бинарника
+# 4. Скачивание TorrServer
 # =========================================================
 
 echo "[4/5] Скачивание TorrServer..."
@@ -137,13 +126,13 @@ echo "Файл: ${ASSET_NAME}"
 echo "URL:  ${DOWNLOAD_URL}"
 echo ""
 
-mkdir -p "${DIR}"
+rm -f "${BINARY}"
 
 wget -O "${BINARY}" "${DOWNLOAD_URL}"
 
 if [ $? -ne 0 ]; then
     echo ""
-    echo "ОШИБКА: TorrServer не удалось скачать."
+    echo "ОШИБКА: не удалось скачать TorrServer."
     rm -f "${BINARY}"
     exit 1
 fi
@@ -155,44 +144,49 @@ if [ ! -s "${BINARY}" ]; then
     exit 1
 fi
 
-# =========================================================
-# Проверяем ELF и архитектуру
-# =========================================================
-
 echo ""
 echo "Проверка бинарника..."
 
-MAGIC="$(hexdump -n 20 -v -e '1/1 "%02x "' "${BINARY}" 2>/dev/null)"
+HEADER="$(hexdump -n 20 -v -e '1/1 "%02x"' "${BINARY}" 2>/dev/null)"
 
 echo "ELF header:"
-echo "${MAGIC}"
+hexdump -n 20 -v -e '1/1 "%02x "' "${BINARY}" 2>/dev/null
 
-# ELF magic
-if ! echo "${MAGIC}" | grep -q "^7f 45 4c 46"; then
-    echo ""
-    echo "ОШИБКА: скачанный файл не является ELF-бинарником."
-    rm -f "${BINARY}"
-    exit 1
-fi
+# Проверяем ELF magic: 7f 45 4c 46
+case "${HEADER}" in
+    7f454c46*)
+        ;;
+    *)
+        echo ""
+        echo "ОШИБКА: файл не является ELF-бинарником."
+        rm -f "${BINARY}"
+        exit 1
+        ;;
+esac
 
-# Для ARM64:
-# ELFCLASS64 = 02
-# EM_AARCH64 = 0xb7 (байты b7 00 в little-endian)
+# =========================================================
+# Проверка архитектуры ELF
+# =========================================================
+
 if [ "${ARCH}" = "arm64" ]; then
 
-    ELF_CLASS="$(hexdump -n 5 -v -e '1/1 "%02x "' "${BINARY}" 2>/dev/null | awk '{print $5}')"
+    # ELFCLASS64 находится в 5-м байте ELF-заголовка.
+    # Для 64-bit значение = 02.
+    ELF_CLASS="$(echo "${HEADER}" | cut -c9-10)"
 
-    MACHINE_BYTES="$(hexdump -s 18 -n 2 -v -e '1/1 "%02x "' "${BINARY}" 2>/dev/null)"
+    # e_machine находится на 18-19 байтах.
+    # AArch64 = 0x00b7.
+    MACHINE_BYTES="$(echo "${HEADER}" | cut -c37-40)"
 
     if [ "${ELF_CLASS}" != "02" ]; then
         echo ""
-        echo "ОШИБКА: получен не 64-битный ELF."
-        echo "Ожидался ELFCLASS64 (02), получено: ${ELF_CLASS}"
+        echo "ОШИБКА: бинарник не является 64-битным."
+        echo "ELF class: ${ELF_CLASS}"
         rm -f "${BINARY}"
         exit 1
     fi
 
-    if [ "${MACHINE_BYTES}" != "b7 00" ]; then
+    if [ "${MACHINE_BYTES}" != "b700" ]; then
         echo ""
         echo "ОШИБКА: бинарник не является ARM64/AArch64."
         echo "Machine: ${MACHINE_BYTES}"
@@ -200,20 +194,45 @@ if [ "${ARCH}" = "arm64" ]; then
         exit 1
     fi
 
+    echo "ELF: 64-bit"
+    echo "Architecture: AArch64 / ARM64"
+
+elif [ "${ARCH}" = "amd64" ]; then
+
+    ELF_CLASS="$(echo "${HEADER}" | cut -c9-10)"
+    MACHINE_BYTES="$(echo "${HEADER}" | cut -c37-40)"
+
+    if [ "${ELF_CLASS}" != "02" ]; then
+        echo ""
+        echo "ОШИБКА: бинарник не является 64-битным."
+        rm -f "${BINARY}"
+        exit 1
+    fi
+
+    if [ "${MACHINE_BYTES}" != "3e00" ]; then
+        echo ""
+        echo "ОШИБКА: бинарник не является x86_64."
+        echo "Machine: ${MACHINE_BYTES}"
+        rm -f "${BINARY}"
+        exit 1
+    fi
+
+    echo "ELF: 64-bit"
+    echo "Architecture: x86_64"
+
 fi
 
 chmod +x "${BINARY}"
 
 echo ""
-echo "Бинарник успешно проверен."
-ls -lh "${BINARY}"
+echo "Бинарник корректный."
 echo ""
 
 # =========================================================
-# 5. Создаём службу OpenWrt
+# 5. Создание init.d службы
 # =========================================================
 
-echo "[5/5] Создание службы OpenWrt..."
+echo "[5/5] Создание службы TorrServer..."
 
 cat > "${INIT_SCRIPT}" << EOF
 #!/bin/sh /etc/rc.common
@@ -239,39 +258,70 @@ EOF
 
 chmod +x "${INIT_SCRIPT}"
 
-echo "Включение автозапуска..."
+echo "Служба создана."
+
+# =========================================================
+# Включение автозапуска
+# =========================================================
+
 "${INIT_SCRIPT}" enable
 
+echo "Автозапуск включён."
+
+# =========================================================
+# Запуск
+# =========================================================
+
+echo ""
 echo "Запуск TorrServer..."
+
 "${INIT_SCRIPT}" start
 
-sleep 2
+sleep 3
+
+# =========================================================
+# Проверка
+# =========================================================
+
+echo ""
+echo "Проверка состояния..."
 
 if "${INIT_SCRIPT}" status | grep -q "running"; then
-    echo ""
-    echo "TorrServer успешно запущен."
-else
-    echo ""
-    echo "ВНИМАНИЕ: TorrServer не запустился."
-    echo "Проверь:"
-    echo "  ${INIT_SCRIPT} status"
-    echo "  logread | grep -i torrserver"
-    exit 1
-fi
 
-echo ""
-echo "======================================"
-echo " TorrServer установлен!"
-echo "======================================"
-echo "Источник:    github.com/${REPO}"
-echo "Версия:      ${RELEASE_TAG}"
-echo "Архитектура: ${ARCH}"
-echo "Бинарник:    ${BINARY}"
-echo "Каталог:     ${DIR}"
-echo "Порт:        8090"
-echo ""
-echo "Открыть:"
-echo "http://IP-РОУТЕРА:8090"
-echo "======================================"
+    echo ""
+    echo "======================================"
+    echo " TorrServer успешно установлен!"
+    echo "======================================"
+    echo ""
+    echo "Версия: ${RELEASE_TAG}"
+    echo "Архитектура: ${ARCH}"
+    echo "Каталог: ${DIR}"
+    echo "Порт: 8090"
+    echo ""
+    echo "Открыть:"
+    echo "http://192.168.1.1:8090"
+    echo ""
+    echo "Статус:"
+    echo "/etc/init.d/torrserver status"
+    echo ""
+    echo "Лог:"
+    echo "logread | grep -i torrserver"
+    echo ""
+
+else
+
+    echo ""
+    echo "======================================"
+    echo " ВНИМАНИЕ: TorrServer не запустился"
+    echo "======================================"
+    echo ""
+    echo "Проверь:"
+    echo ""
+    echo "/etc/init.d/torrserver status"
+    echo "logread | grep -i torrserver"
+    echo ""
+    exit 1
+
+fi
 
 exit 0
