@@ -28,11 +28,9 @@ if [ -f "${INIT_SCRIPT}" ]; then
     rm -f "${INIT_SCRIPT}"
 fi
 
-# На случай, если процесс запущен не через procd
 killall torrserver 2>/dev/null
 killall TorrServer 2>/dev/null
 
-# Удаляем старый бинарник
 rm -f "${BINARY}"
 
 echo "Старый TorrServer удалён."
@@ -88,7 +86,7 @@ echo "Архитектура: ${ARCH}"
 echo ""
 
 # =========================================================
-# 3. Получаем последний релиз bylampa/Matrix
+# 3. Получаем последний релиз
 # =========================================================
 
 echo "[3/5] Поиск последнего релиза..."
@@ -108,12 +106,17 @@ if [ $? -ne 0 ] || [ ! -s "${RELEASE_JSON}" ]; then
     exit 1
 fi
 
-# Получаем tag_name
-RELEASE_TAG="$(sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "${RELEASE_JSON}" | head -n 1)"
+RELEASE_TAG="$(
+    sed -n \
+    's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+    "${RELEASE_JSON}" |
+    head -n 1
+)"
+
+rm -f "${RELEASE_JSON}"
 
 if [ -z "${RELEASE_TAG}" ]; then
     echo "ОШИБКА: не удалось определить версию релиза."
-    rm -f "${RELEASE_JSON}"
     exit 1
 fi
 
@@ -121,36 +124,20 @@ echo "Последний релиз: ${RELEASE_TAG}"
 echo ""
 
 # =========================================================
-# 4. Ищем нужный бинарник и скачиваем его
+# 4. Формируем ПРЯМОЙ URL нужного бинарника
 # =========================================================
 
-echo "[4/5] Поиск TorrServer для ${ARCH}..."
+echo "[4/5] Скачивание TorrServer..."
 
 ASSET_NAME="TorrServer-linux-${ARCH}"
 
-# Ищем download URL именно нужного asset
-DOWNLOAD_URL="$(
-    sed 's/[{},]/\n/g' "${RELEASE_JSON}" |
-    grep -B 15 -A 15 "\"name\"[[:space:]]*:[[:space:]]*\"${ASSET_NAME}\"" |
-    sed -n 's/.*"browser_download_url"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' |
-    head -n 1
-)"
-
-rm -f "${RELEASE_JSON}"
-
-if [ -z "${DOWNLOAD_URL}" ]; then
-    echo "ОШИБКА: в релизе ${RELEASE_TAG} не найден:"
-    echo "${ASSET_NAME}"
-    exit 1
-fi
+DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${RELEASE_TAG}/${ASSET_NAME}"
 
 echo "Файл: ${ASSET_NAME}"
-echo "URL:   ${DOWNLOAD_URL}"
+echo "URL:  ${DOWNLOAD_URL}"
 echo ""
 
 mkdir -p "${DIR}"
-
-echo "Скачивание..."
 
 wget -O "${BINARY}" "${DOWNLOAD_URL}"
 
@@ -168,10 +155,57 @@ if [ ! -s "${BINARY}" ]; then
     exit 1
 fi
 
+# =========================================================
+# Проверяем ELF и архитектуру
+# =========================================================
+
+echo ""
+echo "Проверка бинарника..."
+
+MAGIC="$(hexdump -n 20 -v -e '1/1 "%02x "' "${BINARY}" 2>/dev/null)"
+
+echo "ELF header:"
+echo "${MAGIC}"
+
+# ELF magic
+if ! echo "${MAGIC}" | grep -q "^7f 45 4c 46"; then
+    echo ""
+    echo "ОШИБКА: скачанный файл не является ELF-бинарником."
+    rm -f "${BINARY}"
+    exit 1
+fi
+
+# Для ARM64:
+# ELFCLASS64 = 02
+# EM_AARCH64 = 0xb7 (байты b7 00 в little-endian)
+if [ "${ARCH}" = "arm64" ]; then
+
+    ELF_CLASS="$(hexdump -n 5 -v -e '1/1 "%02x "' "${BINARY}" 2>/dev/null | awk '{print $5}')"
+
+    MACHINE_BYTES="$(hexdump -s 18 -n 2 -v -e '1/1 "%02x "' "${BINARY}" 2>/dev/null)"
+
+    if [ "${ELF_CLASS}" != "02" ]; then
+        echo ""
+        echo "ОШИБКА: получен не 64-битный ELF."
+        echo "Ожидался ELFCLASS64 (02), получено: ${ELF_CLASS}"
+        rm -f "${BINARY}"
+        exit 1
+    fi
+
+    if [ "${MACHINE_BYTES}" != "b7 00" ]; then
+        echo ""
+        echo "ОШИБКА: бинарник не является ARM64/AArch64."
+        echo "Machine: ${MACHINE_BYTES}"
+        rm -f "${BINARY}"
+        exit 1
+    fi
+
+fi
+
 chmod +x "${BINARY}"
 
 echo ""
-echo "TorrServer успешно скачан:"
+echo "Бинарник успешно проверен."
 ls -lh "${BINARY}"
 echo ""
 
@@ -210,6 +244,20 @@ echo "Включение автозапуска..."
 
 echo "Запуск TorrServer..."
 "${INIT_SCRIPT}" start
+
+sleep 2
+
+if "${INIT_SCRIPT}" status | grep -q "running"; then
+    echo ""
+    echo "TorrServer успешно запущен."
+else
+    echo ""
+    echo "ВНИМАНИЕ: TorrServer не запустился."
+    echo "Проверь:"
+    echo "  ${INIT_SCRIPT} status"
+    echo "  logread | grep -i torrserver"
+    exit 1
+fi
 
 echo ""
 echo "======================================"
