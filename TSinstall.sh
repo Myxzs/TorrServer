@@ -14,37 +14,10 @@ echo "======================================"
 echo ""
 
 # =========================================================
-# 1. Удаление старого TorrServer
+# Определение архитектуры
 # =========================================================
-
-echo "[1/5] Удаление старого TorrServer..."
-
-if [ -x "${INIT_SCRIPT}" ]; then
-    echo "Остановка службы..."
-    "${INIT_SCRIPT}" stop 2>/dev/null
-    "${INIT_SCRIPT}" disable 2>/dev/null
-fi
-
-killall torrserver 2>/dev/null
-killall TorrServer 2>/dev/null
-
-rm -f "${BINARY}"
-rm -f "${INIT_SCRIPT}"
-
-mkdir -p "${DIR}"
-
-echo "Старый TorrServer удалён."
-echo ""
-
-# =========================================================
-# 2. Определение архитектуры
-# =========================================================
-
-echo "[2/5] Определение архитектуры..."
 
 MACHINE="$(uname -m)"
-
-echo "Система: ${MACHINE}"
 
 case "${MACHINE}" in
     aarch64)
@@ -63,20 +36,20 @@ case "${MACHINE}" in
         ARCH="386"
         ;;
     *)
-        echo ""
         echo "ОШИБКА: неизвестная архитектура: ${MACHINE}"
         exit 1
         ;;
 esac
 
-echo "Архитектура TorrServer: ${ARCH}"
+echo "Система: ${MACHINE}"
+echo "Архитектура: ${ARCH}"
 echo ""
 
 # =========================================================
-# 3. Получение последнего релиза
+# Получение последнего релиза
 # =========================================================
 
-echo "[3/5] Получение последнего релиза..."
+echo "Проверка последней версии TorrServer..."
 
 RELEASE_JSON="/tmp/torrserver_release.json"
 
@@ -105,18 +78,123 @@ rm -f "${RELEASE_JSON}"
 
 if [ -z "${RELEASE_TAG}" ]; then
     echo ""
-    echo "ОШИБКА: не удалось определить последний релиз."
+    echo "ОШИБКА: не удалось определить последнюю версию."
     exit 1
 fi
 
-echo "Последний релиз: ${RELEASE_TAG}"
+echo "Последняя версия: ${RELEASE_TAG}"
 echo ""
 
 # =========================================================
-# 4. Скачивание TorrServer
+# Определение установленной версии
 # =========================================================
 
-echo "[4/5] Скачивание TorrServer..."
+INSTALLED_VERSION=""
+
+if [ -x "${BINARY}" ]; then
+    INSTALLED_VERSION="$(
+        "${BINARY}" --version 2>/dev/null |
+        head -n 1 |
+        tr -d '\r'
+    )"
+fi
+
+# Если --version вернул что-то вроде:
+# TorrServer MatriX.145.UN
+# пытаемся вытащить MatriX...
+case "${INSTALLED_VERSION}" in
+    *MatriX*)
+        INSTALLED_VERSION="$(
+            echo "${INSTALLED_VERSION}" |
+            sed -n 's/.*\(MatriX[^ ]*\).*/\1/p'
+        )"
+        ;;
+esac
+
+echo "Установленная версия: ${INSTALLED_VERSION:-не определена}"
+echo ""
+
+# =========================================================
+# Если версия уже последняя — ничего не делаем
+# =========================================================
+
+if [ -n "${INSTALLED_VERSION}" ] &&
+   [ "${INSTALLED_VERSION}" = "${RELEASE_TAG}" ]; then
+
+    echo "======================================"
+    echo " TorrServer уже обновлён"
+    echo "======================================"
+    echo ""
+    echo "Установлена последняя версия:"
+    echo "${RELEASE_TAG}"
+    echo ""
+    echo "Переустановка не требуется."
+    echo ""
+
+    exit 0
+fi
+
+# =========================================================
+# Новая версия или версия не определена
+# =========================================================
+
+if [ -n "${INSTALLED_VERSION}" ]; then
+    echo "Доступна новая версия!"
+    echo ""
+    echo "Установлена: ${INSTALLED_VERSION}"
+    echo "Доступна:    ${RELEASE_TAG}"
+else
+    echo "Текущая версия не определена."
+    echo "Будет выполнена установка версии ${RELEASE_TAG}."
+fi
+
+echo ""
+
+# =========================================================
+# Подтверждение обновления
+# =========================================================
+
+printf "Обновить TorrServer? [Y/N]: "
+read ANSWER
+
+case "${ANSWER}" in
+    y|Y|д|Д)
+        ;;
+    *)
+        echo ""
+        echo "Обновление отменено."
+        exit 0
+        ;;
+esac
+
+echo ""
+
+# =========================================================
+# Удаление старой службы / бинарника
+# =========================================================
+
+echo "[1/4] Остановка старого TorrServer..."
+
+if [ -x "${INIT_SCRIPT}" ]; then
+    "${INIT_SCRIPT}" stop 2>/dev/null
+    "${INIT_SCRIPT}" disable 2>/dev/null
+fi
+
+killall torrserver 2>/dev/null
+killall TorrServer 2>/dev/null
+
+rm -f "${BINARY}"
+
+mkdir -p "${DIR}"
+
+echo "Старый бинарник удалён."
+echo ""
+
+# =========================================================
+# Скачивание
+# =========================================================
+
+echo "[2/4] Скачивание TorrServer..."
 
 ASSET_NAME="TorrServer-linux-${ARCH}"
 
@@ -125,8 +203,6 @@ DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${RELEASE_TAG}/${ASSE
 echo "Файл: ${ASSET_NAME}"
 echo "URL:  ${DOWNLOAD_URL}"
 echo ""
-
-rm -f "${BINARY}"
 
 wget -O "${BINARY}" "${DOWNLOAD_URL}"
 
@@ -144,109 +220,17 @@ if [ ! -s "${BINARY}" ]; then
     exit 1
 fi
 
-echo ""
-echo "Проверка бинарника..."
-
-echo "ELF header:"
-hexdump -n 20 -v -e '1/1 "%02x "' "${BINARY}" 2>/dev/null
-
-# =========================================================
-# Проверка ELF
-# =========================================================
-
-ELF_MAGIC="$(
-    hexdump -n 4 -v -e '1/1 "%02x"' "${BINARY}" 2>/dev/null
-)"
-
-if [ "${ELF_MAGIC}" != "7f454c46" ]; then
-    echo ""
-    echo "ОШИБКА: файл не является ELF-бинарником."
-    echo "Magic: ${ELF_MAGIC}"
-    rm -f "${BINARY}"
-    exit 1
-fi
-
-echo "ELF magic: OK"
-
-# =========================================================
-# Проверка ARM64 / AArch64
-# =========================================================
-
-if [ "${ARCH}" = "arm64" ]; then
-
-    ELF_CLASS="$(
-        hexdump -s 4 -n 1 -v -e '1/1 "%02x"' "${BINARY}" 2>/dev/null
-    )"
-
-    MACHINE_BYTES="$(
-        hexdump -s 18 -n 2 -v -e '1/1 "%02x"' "${BINARY}" 2>/dev/null
-    )"
-
-    echo "ELF class: ${ELF_CLASS}"
-    echo "Machine: ${MACHINE_BYTES}"
-
-    if [ "${ELF_CLASS}" != "02" ]; then
-        echo ""
-        echo "ОШИБКА: бинарник не является 64-битным."
-        rm -f "${BINARY}"
-        exit 1
-    fi
-
-    if [ "${MACHINE_BYTES}" != "b700" ]; then
-        echo ""
-        echo "ОШИБКА: бинарник не является ARM64/AArch64."
-        rm -f "${BINARY}"
-        exit 1
-    fi
-
-    echo "Architecture: AArch64 / ARM64"
-fi
-
-# =========================================================
-# Проверка x86_64
-# =========================================================
-
-if [ "${ARCH}" = "amd64" ]; then
-
-    ELF_CLASS="$(
-        hexdump -s 4 -n 1 -v -e '1/1 "%02x"' "${BINARY}" 2>/dev/null
-    )"
-
-    MACHINE_BYTES="$(
-        hexdump -s 18 -n 2 -v -e '1/1 "%02x"' "${BINARY}" 2>/dev/null
-    )"
-
-    echo "ELF class: ${ELF_CLASS}"
-    echo "Machine: ${MACHINE_BYTES}"
-
-    if [ "${ELF_CLASS}" != "02" ]; then
-        echo ""
-        echo "ОШИБКА: бинарник не является 64-битным."
-        rm -f "${BINARY}"
-        exit 1
-    fi
-
-    if [ "${MACHINE_BYTES}" != "3e00" ]; then
-        echo ""
-        echo "ОШИБКА: бинарник не является x86_64."
-        rm -f "${BINARY}"
-        exit 1
-    fi
-
-    echo "Architecture: x86_64"
-fi
-
 chmod +x "${BINARY}"
 
 echo ""
-echo "Бинарник корректный."
+echo "TorrServer скачан."
 echo ""
 
 # =========================================================
-# 5. Создание init.d службы
+# Создание службы
 # =========================================================
 
-echo "[5/5] Создание службы TorrServer..."
+echo "[3/4] Настройка службы..."
 
 cat > "${INIT_SCRIPT}" << EOF
 #!/bin/sh /etc/rc.common
@@ -272,54 +256,33 @@ EOF
 
 chmod +x "${INIT_SCRIPT}"
 
-echo "Служба создана."
-
-# =========================================================
-# Включение автозапуска
-# =========================================================
-
 "${INIT_SCRIPT}" enable
 
-echo "Автозапуск включён."
+echo "Служба настроена."
+echo ""
 
 # =========================================================
 # Запуск
 # =========================================================
 
-echo ""
-echo "Запуск TorrServer..."
+echo "[4/4] Запуск TorrServer..."
 
 "${INIT_SCRIPT}" start
 
 sleep 3
 
-# =========================================================
-# Проверка запуска
-# =========================================================
-
-echo ""
-echo "Проверка состояния..."
-
 if "${INIT_SCRIPT}" status | grep -q "running"; then
 
     echo ""
     echo "======================================"
-    echo " TorrServer успешно установлен!"
+    echo " TorrServer успешно обновлён!"
     echo "======================================"
     echo ""
     echo "Версия: ${RELEASE_TAG}"
     echo "Архитектура: ${ARCH}"
-    echo "Каталог: ${DIR}"
     echo "Порт: 8090"
     echo ""
-    echo "Открыть:"
     echo "http://192.168.1.1:8090"
-    echo ""
-    echo "Статус:"
-    echo "/etc/init.d/torrserver status"
-    echo ""
-    echo "Лог:"
-    echo "logread | grep -i torrserver"
     echo ""
 
 else
@@ -330,12 +293,11 @@ else
     echo "======================================"
     echo ""
     echo "Проверь:"
-    echo ""
     echo "/etc/init.d/torrserver status"
     echo "logread | grep -i torrserver"
     echo ""
-    exit 1
 
+    exit 1
 fi
 
 exit 0
