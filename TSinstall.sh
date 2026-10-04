@@ -87,7 +87,7 @@ wget -q -O "${RELEASE_JSON}" \
     --header="User-Agent: Routerich-TorrServer-Installer" \
     "${API_URL}"
 
-if [ ! -s "${RELEASE_JSON}" ]; then
+if [ $? -ne 0 ] || [ ! -s "${RELEASE_JSON}" ]; then
     echo ""
     echo "ОШИБКА: не удалось получить информацию о последнем релизе."
     rm -f "${RELEASE_JSON}"
@@ -147,41 +147,47 @@ fi
 echo ""
 echo "Проверка бинарника..."
 
-HEADER="$(hexdump -n 20 -v -e '1/1 "%02x"' "${BINARY}" 2>/dev/null)"
-
 echo "ELF header:"
 hexdump -n 20 -v -e '1/1 "%02x "' "${BINARY}" 2>/dev/null
 
-# Проверяем ELF magic: 7f 45 4c 46
-case "${HEADER}" in
-    7f454c46*)
-        ;;
-    *)
-        echo ""
-        echo "ОШИБКА: файл не является ELF-бинарником."
-        rm -f "${BINARY}"
-        exit 1
-        ;;
-esac
+# =========================================================
+# Проверка ELF
+# =========================================================
+
+ELF_MAGIC="$(
+    hexdump -n 4 -v -e '1/1 "%02x"' "${BINARY}" 2>/dev/null
+)"
+
+if [ "${ELF_MAGIC}" != "7f454c46" ]; then
+    echo ""
+    echo "ОШИБКА: файл не является ELF-бинарником."
+    echo "Magic: ${ELF_MAGIC}"
+    rm -f "${BINARY}"
+    exit 1
+fi
+
+echo "ELF magic: OK"
 
 # =========================================================
-# Проверка архитектуры ELF
+# Проверка ARM64 / AArch64
 # =========================================================
 
 if [ "${ARCH}" = "arm64" ]; then
 
-    # ELFCLASS64 находится в 5-м байте ELF-заголовка.
-    # Для 64-bit значение = 02.
-    ELF_CLASS="$(echo "${HEADER}" | cut -c9-10)"
+    ELF_CLASS="$(
+        hexdump -s 4 -n 1 -v -e '1/1 "%02x"' "${BINARY}" 2>/dev/null
+    )"
 
-    # e_machine находится на 18-19 байтах.
-    # AArch64 = 0x00b7.
-    MACHINE_BYTES="$(echo "${HEADER}" | cut -c37-40)"
+    MACHINE_BYTES="$(
+        hexdump -s 18 -n 2 -v -e '1/1 "%02x"' "${BINARY}" 2>/dev/null
+    )"
+
+    echo "ELF class: ${ELF_CLASS}"
+    echo "Machine: ${MACHINE_BYTES}"
 
     if [ "${ELF_CLASS}" != "02" ]; then
         echo ""
         echo "ОШИБКА: бинарник не является 64-битным."
-        echo "ELF class: ${ELF_CLASS}"
         rm -f "${BINARY}"
         exit 1
     fi
@@ -189,18 +195,29 @@ if [ "${ARCH}" = "arm64" ]; then
     if [ "${MACHINE_BYTES}" != "b700" ]; then
         echo ""
         echo "ОШИБКА: бинарник не является ARM64/AArch64."
-        echo "Machine: ${MACHINE_BYTES}"
         rm -f "${BINARY}"
         exit 1
     fi
 
-    echo "ELF: 64-bit"
     echo "Architecture: AArch64 / ARM64"
+fi
 
-elif [ "${ARCH}" = "amd64" ]; then
+# =========================================================
+# Проверка x86_64
+# =========================================================
 
-    ELF_CLASS="$(echo "${HEADER}" | cut -c9-10)"
-    MACHINE_BYTES="$(echo "${HEADER}" | cut -c37-40)"
+if [ "${ARCH}" = "amd64" ]; then
+
+    ELF_CLASS="$(
+        hexdump -s 4 -n 1 -v -e '1/1 "%02x"' "${BINARY}" 2>/dev/null
+    )"
+
+    MACHINE_BYTES="$(
+        hexdump -s 18 -n 2 -v -e '1/1 "%02x"' "${BINARY}" 2>/dev/null
+    )"
+
+    echo "ELF class: ${ELF_CLASS}"
+    echo "Machine: ${MACHINE_BYTES}"
 
     if [ "${ELF_CLASS}" != "02" ]; then
         echo ""
@@ -212,14 +229,11 @@ elif [ "${ARCH}" = "amd64" ]; then
     if [ "${MACHINE_BYTES}" != "3e00" ]; then
         echo ""
         echo "ОШИБКА: бинарник не является x86_64."
-        echo "Machine: ${MACHINE_BYTES}"
         rm -f "${BINARY}"
         exit 1
     fi
 
-    echo "ELF: 64-bit"
     echo "Architecture: x86_64"
-
 fi
 
 chmod +x "${BINARY}"
@@ -280,7 +294,7 @@ echo "Запуск TorrServer..."
 sleep 3
 
 # =========================================================
-# Проверка
+# Проверка запуска
 # =========================================================
 
 echo ""
